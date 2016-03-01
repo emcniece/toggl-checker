@@ -8,6 +8,7 @@ var dateFormat = require('dateformat');
 var q = require('promised-io/promise');
 var gcreds = require('./Eric-Toggl-Worklog-Updater-8965f1889488.json');
 var gsheet = require("google-spreadsheet");
+var PushBullet = require('pushbullet');
 var app = express();
 
 // API Credentials
@@ -24,6 +25,10 @@ var apis = {
   sheets:{
     id: '1BWplFseqlyFEv3B3Jtuv8GXK1-LrY8QY84aW4S1yYRs',
     worksheet_id: 1 // Worksheet ID, starts at index 1
+  },
+  pushbullet:{
+    key: 'o.8cVFoIcgE4w4eCOeHpXmOva5D9P311hk',
+    device: 'ujyYjce8R9UsjAsoeMFET6'
   }
 }
 
@@ -32,6 +37,7 @@ var togglSummaryHash = hash({});
 var togglAdded = [];
 var startTime = new Date();
 var timesheet = new gsheet(apis.sheets.id);
+var pusher = new PushBullet(apis.pushbullet.key);
 //https://docs.google.com/spreadsheets/d/1BWplFseqlyFEv3B3Jtuv8GXK1-LrY8QY84aW4S1yYRs/edit#gid=25
 
 var apiOpts = {
@@ -52,6 +58,8 @@ app.get('/summary-short', routeSummaryShort);
 // Sheets
 app.get('/rows', routeRows);  // /rows?date=yyyy-mm-dd
 app.get('/sync', routeSync);  // sync today
+// Pushbullet
+app.get('/devices', routeDevices);
 
 /*
 app.get('/test', function(){
@@ -208,6 +216,12 @@ function routeSync(req, res){
   });
 }
 
+function routeDevices(req, res){
+  pusher.devices(function(e, response){
+    printRaw(res, response);
+  });
+}
+
 /*
   SERVER STARTUP
 */
@@ -283,6 +297,8 @@ function updateTimesheet(req){
           // existing project?
           if( (togglDate == sheetRow.date) && (togglRow.title == sheetRow.project)){
             console.log('Updating existing project: ' + togglRow.title+' '+togglDate);
+            pusher.note(apis.pushbullet.device, 'Toggl Checker', 'Updated: '+togglRow.title+' '+togglDate);
+
             sheetRow.description = togglRow.desc;
             sheetRow.hours = togglRow.hours;
             sheetRow.weekday = togglDay;
@@ -307,6 +323,7 @@ function updateTimesheet(req){
           };
 
           timesheet.addRow(apis.sheets.worksheet_id, newRow, function(rowOrError){
+            pusher.note(apis.pushbullet.device, 'Toggl Checker', 'Added: '+togglRow.title+' '+togglDate);
             console.log('Adding new row: ', rowOrError);
           });
         }
