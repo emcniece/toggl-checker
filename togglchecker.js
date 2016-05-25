@@ -231,6 +231,7 @@ var server = app.listen(8081, function () {
   var port = server.address().port
 
   console.log("Toggl Checker listening at http://%s:%s", host, port)
+  pusher.note(apis.pushbullet.device, 'Toggl Checker', 'Starting app!');
 
   var init = q.all(testToggl() , testSheets() );
   init.then(function(returns){
