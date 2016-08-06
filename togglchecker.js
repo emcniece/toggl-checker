@@ -6,10 +6,16 @@ var express = require('express');
 var hash = require('object-hash');
 var dateFormat = require('dateformat');
 var q = require('promised-io/promise');
+var async = require('async');
 var gcreds = require('./Eric-Toggl-Worklog-Updater-8965f1889488.json');
 var gsheet = require("google-spreadsheet");
 var PushBullet = require('pushbullet');
 var app = express();
+
+/*
+  To add this to a new sheet, invite the email address from the JSON file.
+  eric-toggl-worklog-updater@appspot.gserviceaccount.com
+*/
 
 // API Credentials
 var apis = {
@@ -23,7 +29,8 @@ var apis = {
     workspace_id: 309840
   },
   sheets:{
-    id: '1BWplFseqlyFEv3B3Jtuv8GXK1-LrY8QY84aW4S1yYRs',
+    //id: '1BWplFseqlyFEv3B3Jtuv8GXK1-LrY8QY84aW4S1yYRs', // old sheet
+    id: '1VA44ZzEMdq0iX0EQmc5jp8AODSapF59lcxE0DYYlpjY',   // new sheet
     worksheet_id: 1 // Worksheet ID, starts at index 1
   },
   pushbullet:{
@@ -34,6 +41,7 @@ var apis = {
 
 // Global settings
 var togglSummaryHash = hash({});
+var togglProjects = {};
 var togglAdded = [];
 var startTime = new Date();
 var timesheet = new gsheet(apis.sheets.id);
@@ -51,15 +59,16 @@ var apiOpts = {
 app.use(routeAll);
 // Toggl
 app.get('/', routeMain);
-app.get('/today', routeToday);
-app.get('/latest', routeLatest);
-app.get('/summary', routeSummary);
-app.get('/summary-short', routeSummaryShort);
+app.get('/toggl/today', routeToday);
+app.get('/toggl/latest', routeLatest);
+app.get('/toggl/summary', routeSummary);
+app.get('/toggl/summary-short', routeSummaryShort);
+app.get('/toggl/latest-short', routeLatestSummary);
 // Sheets
-app.get('/rows', routeRows);  // /rows?date=yyyy-mm-dd
-app.get('/sync', routeSync);  // sync today
+app.get('/sheets/rows', routeRows);  // /rows?date=yyyy-mm-dd
+app.get('/sheets/sync', routeSync);  // sync today
 // Pushbullet
-app.get('/devices', routeDevices);
+app.get('/pushbullet/devices', routeDevices);
 
 /*
 app.get('/test', function(){
@@ -112,6 +121,45 @@ function routeLatest(req, res){
   queryApi(apis.toggl.urls.base, 'time_entries').then(function(data){
     printRaw(res, data);
   });
+}
+
+function routeLatestSummary(req, res){
+  var deferred = q.defer();
+
+  queryApi(apis.toggl.urls.base, 'time_entries').then(function(data){
+    _.each(data, function(entry){
+      var project = _.findWhere(togglProjects, {id: entry.pid})
+      if(project) entry.project = project.name;
+    });
+
+    data = _.groupBy(data, function(entry){ return dateFormat(entry.stop, 'yyyy-mm-dd') });
+
+    var dateGroups = {};
+    _.each(data, function(dateGroup, date){
+      projGroup = _.groupBy(dateGroup, function(entry){ return entry.pid; });
+
+      projGroup = _.map(projGroup, function(project, pid){
+        var sum = _.reduce(project, function(memo, val){ return memo + val.duration }, 0);
+        var desc = _.reduce(project, function(memo, val){
+
+        if(!memo){
+            return val.description;
+          } else if(memo.indexOf(val.description) == -1)
+            return memo + ', ' + val.description
+        }, "");
+
+        return { name: pid, hours: (sum/60/60).toFixed(2), description: desc, project: project[0].project}
+      });
+
+      dateGroups[date] = projGroup;
+    });
+
+    if(res) printRaw(res, dateGroups);
+    deferred.resolve(dateGroups);
+    return dateGroups;
+  });
+
+  return deferred.promise;
 }
 
 function routeSummary(req, res){
@@ -233,12 +281,13 @@ var server = app.listen(8081, function () {
   console.log("Toggl Checker listening at http://%s:%s", host, port)
   pusher.note(apis.pushbullet.device, 'Toggl Checker', 'Starting app!');
 
-  var init = q.all(testToggl() , testSheets() );
+  var init = q.all(testToggl(), testSheets() );
   init.then(function(returns){
     console.log('API tests complete! Starting monitoring process...');
 
-    // TODO: get list of projects
-    var togglTask = setInterval(togglSyncToday, 3000);
+    togglSyncProjects();
+    var togglTask = setInterval(togglSyncLatest, 3000);
+    var togglProjectUpdater = setInterval(togglSyncProjects, 3600000);
 
   }, function(error){
     console.log('API test failure:', error);
@@ -250,9 +299,45 @@ var server = app.listen(8081, function () {
 /*
   TASK LAYER
 */
-function togglSyncToday(req){
+function togglSyncProjects(){
+  queryApi(apis.toggl.urls.base, 'workspaces/'+apis.toggl.workspace_id+'/projects').then(function(projects){
+    togglProjects = projects;
+  });
+}
+
+function togglSyncToday(){
   var deferred = q.defer();
-  routeSummaryShort().then(function(summary){
+
+  routeSummaryShort(req).then(function(summary){
+
+    // Ensure we have a proper 'today' summary
+    if(summary.length && hash(summary) !== togglSummaryHash){
+      console.log( 'Updating Summary... ');
+      togglSummaryHash = hash(summary);
+
+      updateTimesheet(req).then(function(){
+        console.log('-- Summary update complete!');
+        deferred.resolve();
+      });
+    }
+
+  });
+
+  return deferred.promise;
+}
+
+function togglSyncLatest(){
+  var deferred = q.defer();
+  var d = new Date();
+
+
+  var req = {
+    query: {
+      date: dateFormat(d.setDate(d.getDate()), 'yyyy-mm-dd')
+    }
+  }
+
+  routeSummaryShort(req).then(function(summary){
 
     // Ensure we have a proper 'today' summary
     if(summary.length && hash(summary) !== togglSummaryHash){
@@ -272,63 +357,77 @@ function togglSyncToday(req){
 
 function updateTimesheet(req){
   var deferred = q.defer();
-  var date;
+  var newRows = [];
 
-  if(req && req.query && req.query.date){
-    date = parseDate(req.query.date);
-  } else {
-    date = new time.Date();
-    date.setTimezone('America/Vancouver');
-    date.setHours(0,0,0,0);
-  }
+  getSheetRows().then(function(sheetRows){
 
-  getRowsByDate(date).then(function(sheetRows){
-    routeSummaryShort(req).then(function(togglRows){
+    routeLatestSummary(req).then(function(togglRows){
+      if(!_.keys(togglRows).length) return;
 
-      if(!togglRows.length) return;
+      _.each(togglRows, function(togglRow, togglRowDate){
+        var togglDate = dateFormat(togglRowDate, 'm/d/yyyy');
+        var monthYear = dateFormat(togglRowDate, 'm/yyyy');
+        var year = dateFormat(togglRowDate, 'yyyy');
 
-      _.each(togglRows, function(togglRow){
-        var togglDate = dateFormat(togglRow.date, 'm/d/yyyy');
-        var togglMonth = dateFormat(togglRow.date, "'m/yyyy");
-        var togglDay = dateFormat(togglRow.date, "dddd");
+        // TODO: sync this number with Sheet's WEEKNUM
+        var week = dateFormat(togglRowDate, 'W');
         var rowUpdated = false;
 
-        _.each(sheetRows, function(sheetRow){
+        _.each(togglRow, function(togglEntry){
+          // Skip in-progress entries
+          if(togglEntry.hours < 0) return;
 
-          // existing project?
-          if( (togglDate == sheetRow.date) && (togglRow.title == sheetRow.project)){
-            console.log('Updating existing project: ' + togglRow.title+' '+togglDate);
-            pusher.note(apis.pushbullet.device, 'Toggl Checker', 'Updated: '+togglRow.title+' '+togglDate);
+          _.each(sheetRows, function(sheetRow){
 
-            sheetRow.description = togglRow.desc;
-            sheetRow.hours = togglRow.hours;
-            sheetRow.weekday = togglDay;
+            // existing project?
+            if((togglDate == sheetRow.date) && (togglEntry.project == sheetRow.project) ){
+              rowUpdated = true;
 
-            // Auto-formats to date when it hits the sheet... place a comma
-            // in front to prevent this in the cell display
-            sheetRow.month = togglMonth;
-            sheetRow.save();
-            rowUpdated = true;
-          }
-        });
+              if((togglEntry.hours !== sheetRow.hours) || (togglEntry.description !== sheetRow.description) ){
+                console.log('Updating existing project: ' + togglEntry.project+' '+togglDate);
+                pusher.note(apis.pushbullet.device, 'Toggl Checker', 'Updated: '+togglEntry.project+' '+togglDate);
 
-        // Add new row!
-        if( !rowUpdated){
-          var newRow = {
-            date: togglDate,
-            month: togglMonth,
-            weekday: togglDay,
-            project: togglRow.title,
-            hours: togglRow.hours,
-            description: togglRow.desc
-          };
+                sheetRow.description = togglEntry.description;
+                sheetRow.hours = togglEntry.hours;
+                sheetRow.week = week;
+                sheetRow.month = monthYear;
+                sheetRow.year = year;
 
-          timesheet.addRow(apis.sheets.worksheet_id, newRow, function(rowOrError){
-            pusher.note(apis.pushbullet.device, 'Toggl Checker', 'Added: '+togglRow.title+' '+togglDate);
-            console.log('Adding new row: ', rowOrError);
+                sheetRow.save();
+              }
+            }
           });
-        }
+
+          // Add new row!
+          if( !rowUpdated){
+            var newRow = {
+              date: togglDate,
+              project: togglEntry.project,
+              hours: togglEntry.hours,
+              description: togglEntry.description,
+              week: week,
+              month: monthYear,
+              year: year,
+            };
+
+            newRows.push(newRow);
+
+
+          }
+        }); // each togglRow
       });
+    }).then(function(){
+      async.eachSeries(newRows, function(row, callback){
+        timesheet.addRow(apis.sheets.worksheet_id, row, function(rowOrError){
+          console.log('Adding new row: ', row.date, row.project, rowOrError);
+          callback();
+        });
+      }, function(error){
+        pusher.note(apis.pushbullet.device, 'Toggl Checker', 'Added: '+newRows.length+' new rows');
+        if(error) console.log(error)
+      });
+
+
     });
 
     deferred.resolve(sheetRows);
@@ -410,14 +509,14 @@ function testSheets(){
 
       timesheet.getInfo( function( err, sheet_info ){
         if(err){
-          console.log('-- Toggl API fail');
+          console.log('-- Sheets API fail');
           deferred.reject(err);
         } else if(sheet_info && sheet_info.title){
           //console.log( sheet_info.title + ' is loaded' );
           console.log( '-- Sheets API Pass');
           deferred.resolve();
         } else{
-          console.log('-- Toggl API fail');
+          console.log('-- Sheets API fail');
           deferred.reject('timesheet.getInfo error');
         }
       });

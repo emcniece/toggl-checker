@@ -9,6 +9,7 @@
   "author": "Eric McNiece",
   "license": "ISC",
   "dependencies": {
+    "async": "^2.0.1",
     "dateformat": "^1.0.12",
     "express": "^4.13.4",
     "google-spreadsheet": "^1.1.4",
